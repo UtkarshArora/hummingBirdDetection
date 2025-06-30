@@ -11,7 +11,7 @@ import os
 from PIL import Image
 import torch
 
-# Fix path consistency - use absolute or consistent relative paths
+
 BASE_DIR = "../data/raw/Dataset_HBird"
 IMAGE_DIR = f"{BASE_DIR}/train/images"
 TRAIN_ANNOTATIONS = f"{BASE_DIR}/train/annotations/trainData.json"
@@ -22,19 +22,19 @@ class RTDetrDataCollator:
         self.processor = processor
 
     def __call__(self, batch):
-        # batch is a list of dictionaries from our initial dataset
+        
         pixel_values = []
         labels = []
 
         for example in batch:
             try:
-                # Load image
+                
                 image = Image.open(example["image_path"]).convert("RGB")
                 image_annotations = example["objects"]
 
-                # Prepare annotations in the format the processor expects
+                
                 if not image_annotations["bbox"]:
-                    # Handle images with no objects by creating a dummy annotation
+
                     h, w = image.size[1], image.size[0]
                     dummy_bbox = [w // 2 - 1, h // 2 - 1, w // 2 + 1, h // 2 + 1]
                     annotations_for_proc = {
@@ -53,10 +53,8 @@ class RTDetrDataCollator:
                         ]
                     }
 
-                # Process image and annotations
                 encoding = self.processor(images=image, annotations=annotations_for_proc, return_tensors="pt")
 
-                # The processor adds a batch dimension, so we squeeze it
                 pixel_values.append(encoding["pixel_values"].squeeze(0))
                 labels.append(encoding["labels"][0])
 
@@ -64,11 +62,9 @@ class RTDetrDataCollator:
                 print(f"Skipping corrupted sample {example.get('image_id', 'unknown')}: {e}")
                 continue
         
-        # If all samples in the batch are corrupted, return an empty dict
         if not pixel_values:
             return {}
 
-        # Collate the processed items into a batch
         final_batch = {
             "pixel_values": torch.stack(pixel_values),
             "labels": labels
@@ -112,8 +108,6 @@ def load_coco_dataset(image_dir, annotation_file):
 
     return dataset_entries
 
-
-# --- 3. Load Datasets (Simpler now) ---
 print("Loading training dataset...")
 train_data = load_coco_dataset(IMAGE_DIR, TRAIN_ANNOTATIONS)
 train_dataset = Dataset.from_list(train_data)
@@ -125,7 +119,7 @@ test_dataset = Dataset.from_list(test_data)
 print(f"Train dataset size: {len(train_dataset)}")
 print(f"Test dataset size: {len(test_dataset)}")
 
-# --- 4. Initialize Processor, Config, and Model (Unchanged) ---
+
 processor = RTDetrImageProcessor.from_pretrained("PekingU/rtdetr_r50vd")
 
 new_config = RTDetrConfig.from_pretrained(
@@ -141,57 +135,63 @@ model = RTDetrForObjectDetection.from_pretrained(
     ignore_mismatched_sizes=True
 )
 
-# --- 5. Instantiate the new Data Collator ---
 data_collator = RTDetrDataCollator(processor=processor)
 
-# --- 6. Training Arguments and Trainer (Apply the fix) ---
 training_args = TrainingArguments(
     output_dir="./hummingbird_detection/outputs",
-    per_device_train_batch_size=2, # Increased slightly for stability
+    per_device_train_batch_size=2, 
     num_train_epochs=1,
     learning_rate=5e-5,
     weight_decay=0.01,
     logging_steps=50,
-    save_strategy="epoch",
-    eval_strategy="epoch",
-    remove_unused_columns=False, # IMPORTANT: Keep original columns for the collator
+    save_strategy="steps",
+    save_steps=500,
+    remove_unused_columns=False, 
     use_cpu=True,
     dataloader_num_workers=0,
-    save_total_limit=2,
+    save_total_limit=3,
     load_best_model_at_end=True,
+    eval_strategy="steps",
+    eval_steps=500,  
     report_to="none"
 )
 
-# Initialize the Trainer with our custom data collator
 trainer = Trainer(
     model=model,
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=test_dataset,
-    data_collator=data_collator # Use the new collator class instance
+    data_collator=data_collator 
 )
 
 print("Starting training...")
-trainer.train()
+
+from pathlib import Path
+
+checkpoint_dir = Path(training_args.output_dir)
+checkpoints = sorted(checkpoint_dir.glob("checkpoint-*"), key=lambda p: int(p.name.split("-")[-1]))
+if checkpoints:
+    last_ckpt = str(checkpoints[-1])
+    print(f"Resuming training from checkpoint: {last_ckpt}")
+    trainer.train(resume_from_checkpoint=last_ckpt)
+else:
+    print("No checkpoint found. Starting fresh training...")
+    trainer.train()
 
 import supervision as sv
 
-# Paths
-# Load COCO annotations
 with open(TEST_ANNOTATIONS, "r") as f:
     coco = json.load(f)
 
-# Build image_id to file_name mapping
+
 image_id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
 image_id_to_size = {img["id"]: (img["width"], img["height"]) for img in coco["images"]}
 
-# Build image_id to annotations mapping
 from collections import defaultdict
 anns_per_image = defaultdict(list)
 for ann in coco["annotations"]:
     anns_per_image[ann["image_id"]].append(ann)
 
-# Evaluation
 model.eval()
 targets = []
 predictions = []
@@ -201,7 +201,7 @@ for image_id, file_name in image_id_to_file.items():
     image = Image.open(img_path).convert("RGB")
     w, h = image_id_to_size[image_id]
 
-    # Prepare ground truth
+
     gt_boxes = []
     gt_labels = []
     for ann in anns_per_image[image_id]:
@@ -210,7 +210,6 @@ for image_id, file_name in image_id_to_file.items():
         gt_labels.append(ann["category_id"])
     targets.append(sv.Detections(xyxy=gt_boxes, class_id=gt_labels))
 
-    # Model prediction
     inputs = processor(images=image, return_tensors="pt").to(model.device)
     with torch.no_grad():
         outputs = model(**inputs)
@@ -223,7 +222,7 @@ for image_id, file_name in image_id_to_file.items():
     pred_labels = results["labels"].cpu().numpy() if torch.is_tensor(results["labels"]) else results["labels"]
     predictions.append(sv.Detections(xyxy=pred_boxes, class_id=pred_labels, confidence=pred_scores))
 
-# Compute mAP
+
 mean_average_precision = sv.MeanAveragePrecision.from_detections(
     predictions=predictions,
     targets=targets,
