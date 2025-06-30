@@ -4,7 +4,7 @@
     <img src="https://img.shields.io/badge/CCDS-Project%20template-328F97?logo=cookiecutter" />
 </a>
 
-): Detecting humming birds in the dataset and describing their behavior
+Detecting humming birds in the dataset and describing their behavior
 
 ## Project Organization
 
