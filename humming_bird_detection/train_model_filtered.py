@@ -1,9 +1,26 @@
-# # from transformers import RTDetrForObjectDetection, RTDetrConfig, RTDetrImageProcessor, TrainingArguments, Trainer
-# # from datasets import load_dataset, Dataset
-# # import xjson
-# # import os
-# # from PIL import Image
+import json
 
+# Filter annotations to keep only category_id == 2 (hummingbird)
+def filter_hummingbird_annotations(annotation_path):
+    with open(annotation_path, 'r') as f:
+        data = json.load(f)
+
+    filtered_annotations = [ann for ann in data["annotations"] if ann["category_id"] == 2]
+    used_image_ids = {ann["image_id"] for ann in filtered_annotations}
+
+    filtered_images = [img for img in data["images"] if img["id"] in used_image_ids]
+    filtered_categories = [cat for cat in data["categories"] if cat["id"] == 2]
+
+    cleaned_data = {
+        "images": filtered_images,
+        "annotations": filtered_annotations,
+        "categories": filtered_categories
+    }
+
+    with open(annotation_path, "w") as f:
+        json.dump(cleaned_data, f)
+
+filter_hummingbird_annotations("./Label-Birdfeeder-Camera-Observations-3/train/_annotations.coco.json")
 
 from roboflow import Roboflow
 rf = Roboflow(api_key="emHcbgLhITmU2KHvC6I7")
@@ -11,10 +28,8 @@ project = rf.workspace("humming-bird-detection").project("label-birdfeeder-camer
 version = project.version(3)
 dataset = version.download("coco")
 
-
 from transformers import RTDetrForObjectDetection, RTDetrConfig, RTDetrImageProcessor, TrainingArguments, Trainer
 from datasets import Dataset
-import json
 import os
 from PIL import Image
 import torch
@@ -23,7 +38,6 @@ import random
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-#BASE_DIR = "./Label-Birdfeeder-Camera-Observations-3"
 TRAIN_IMAGE_DIR = "./Label-Birdfeeder-Camera-Observations-3/train"
 
 class RTDetrDataCollator:
@@ -31,19 +45,15 @@ class RTDetrDataCollator:
         self.processor = processor
 
     def __call__(self, batch):
-        
         pixel_values = []
         labels = []
 
         for example in batch:
             try:
-                
                 image = Image.open(example["image_path"]).convert("RGB")
                 image_annotations = example["objects"]
 
-                
                 if not image_annotations["bbox"]:
-
                     h, w = image.size[1], image.size[0]
                     dummy_bbox = [w // 2 - 1, h // 2 - 1, w // 2 + 1, h // 2 + 1]
                     annotations_for_proc = {
@@ -53,41 +63,40 @@ class RTDetrDataCollator:
                 else:
                     annotations_for_proc = {
                         "image_id": example["image_id"],
-                        "annotations": [
-                            {"bbox": bbox, "category_id": cat_id, "area": area, "iscrowd": iscrowd}
-                            for bbox, cat_id, area, iscrowd in zip(
-                                image_annotations["bbox"], image_annotations["category_id"],
-                                image_annotations["area"], image_annotations["iscrowd"]
-                            )
-                        ]
+                        "annotations": []
                     }
+                    for bbox, area, iscrowd in zip(
+                        image_annotations["bbox"],
+                        image_annotations["area"],
+                        image_annotations["iscrowd"]
+                    ):
+                        annotations_for_proc["annotations"].append({
+                            "bbox": bbox, "category_id": 0, "area": area, "iscrowd": iscrowd
+                        })
 
                 encoding = self.processor(images=image, annotations=annotations_for_proc, return_tensors="pt")
-
                 pixel_values.append(encoding["pixel_values"].squeeze(0))
                 labels.append(encoding["labels"][0])
 
             except Exception as e:
                 print(f"Skipping corrupted sample {example.get('image_id', 'unknown')}: {e}")
                 continue
-        
+
         if not pixel_values:
             return {}
 
-        final_batch = {
+        return {
             "pixel_values": torch.stack(pixel_values),
             "labels": labels
         }
-        return final_batch
 
-# Path to original dataset
 ANNOTATION_PATH = "./Label-Birdfeeder-Camera-Observations-3/train/_annotations.coco.json"
 OUTPUT_DIR = "./Label-Birdfeeder-Camera-Observations-3"
 
 with open(ANNOTATION_PATH, 'r') as f:
     coco = json.load(f)
 
-random.seed(42)  # reproducibility
+random.seed(42)
 images = coco["images"]
 random.shuffle(images)
 
@@ -101,27 +110,35 @@ train_annotations = [ann for ann in coco["annotations"] if ann["image_id"] in tr
 valid_annotations = [ann for ann in coco["annotations"] if ann["image_id"] in valid_image_ids]
 
 split_coco = {
-    "train": {
-        "images": train_images,
-        "annotations": train_annotations,
-        "categories": coco["categories"]
-    },
-    "valid": {
-        "images": valid_images,
-        "annotations": valid_annotations,
-        "categories": coco["categories"]
-    }
+    "train": {"images": train_images, "annotations": train_annotations, "categories": coco["categories"]},
+    "valid": {"images": valid_images, "annotations": valid_annotations, "categories": coco["categories"]}
 }
 
-# Write new files
 with open(os.path.join(OUTPUT_DIR, "train_split.json"), "w") as f:
     json.dump(split_coco["train"], f)
-
 with open(os.path.join(OUTPUT_DIR, "valid_split.json"), "w") as f:
     json.dump(split_coco["valid"], f)
 
 print("✅ Dataset split complete: train_split.json and valid_split.json created.")
 
+def remap_category_ids(json_path):
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+
+    for ann in data["annotations"]:
+        if ann["category_id"] == 2:
+            ann["category_id"] = 0
+
+    # Overwrite categories to match the config
+    data["categories"] = [{"id": 0, "name": "hummingbird"}]
+
+    with open(json_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+# 🔁 Run after split
+remap_category_ids(os.path.join(OUTPUT_DIR, "train_split.json"))
+remap_category_ids(os.path.join(OUTPUT_DIR, "valid_split.json"))
+print("✅ category_id=2 changed to 0 in both split files.")
 
 
 def load_coco_dataset(image_dir, annotation_file):
@@ -132,9 +149,7 @@ def load_coco_dataset(image_dir, annotation_file):
     annotations_by_image = {}
     for ann in coco_data['annotations']:
         image_id = ann['image_id']
-        if image_id not in annotations_by_image:
-            annotations_by_image[image_id] = []
-        annotations_by_image[image_id].append(ann)
+        annotations_by_image.setdefault(image_id, []).append(ann)
 
     dataset_entries = []
     for image_id, image_info in images.items():
@@ -147,7 +162,7 @@ def load_coco_dataset(image_dir, annotation_file):
         for ann in image_annotations:
             x, y, w, h = ann['bbox']
             objects['bbox'].append([x, y, x + w, y + h])
-            objects['category_id'].append(ann["category_id"])
+            objects['category_id'].append(0)
             objects['area'].append(ann.get('area', w * h))
             objects['iscrowd'].append(ann.get('iscrowd', 0))
 
@@ -158,7 +173,6 @@ def load_coco_dataset(image_dir, annotation_file):
         })
 
     return dataset_entries
-
 
 TRAIN_ANNOTATIONS = "./Label-Birdfeeder-Camera-Observations-3/train_split.json"
 TEST_ANNOTATIONS = "./Label-Birdfeeder-Camera-Observations-3/valid_split.json"
@@ -173,7 +187,6 @@ test_dataset = Dataset.from_list(test_data)
 
 print(f"Train dataset size: {len(train_dataset)}")
 print(f"Test dataset size: {len(test_dataset)}")
-
 
 processor = RTDetrImageProcessor.from_pretrained("PekingU/rtdetr_r50vd")
 
@@ -191,12 +204,11 @@ model = RTDetrForObjectDetection.from_pretrained(
 )
 model.to(device)
 
-
 data_collator = RTDetrDataCollator(processor=processor)
 
 training_args = TrainingArguments(
     output_dir="./hummingbird_detection/outputs",
-    per_device_train_batch_size=2, 
+    per_device_train_batch_size=2,
     num_train_epochs=20,
     learning_rate=5e-5,
     weight_decay=0.01,
@@ -208,7 +220,7 @@ training_args = TrainingArguments(
     save_total_limit=3,
     load_best_model_at_end=True,
     eval_strategy="steps",
-    eval_steps=500,  
+    eval_steps=500,
     report_to="none"
 )
 
@@ -217,7 +229,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=test_dataset,
-    data_collator=data_collator 
+    data_collator=data_collator
 )
 
 print("Starting training...")
@@ -235,10 +247,10 @@ else:
     trainer.train()
 
 import supervision as sv
+import numpy as np
 
 with open(TEST_ANNOTATIONS, "r") as f:
     coco = json.load(f)
-
 
 image_id_to_file = {img["id"]: img["file_name"] for img in coco["images"]}
 image_id_to_size = {img["id"]: (img["width"], img["height"]) for img in coco["images"]}
@@ -257,35 +269,59 @@ for image_id, file_name in image_id_to_file.items():
     image = Image.open(img_path).convert("RGB")
     w, h = image_id_to_size[image_id]
 
-
     gt_boxes = []
     gt_labels = []
     for ann in anns_per_image[image_id]:
         x, y, box_w, box_h = ann["bbox"]
         gt_boxes.append([x, y, x + box_w, y + box_h])
-        gt_labels.append(ann["category_id"])
+        gt_labels.append(0)
+
+    if gt_boxes:
+            gt_boxes = np.array(gt_boxes, dtype=np.float32)
+            gt_labels = np.array(gt_labels, dtype=np.int64)
+    else:
+            # Create empty arrays with correct shape for images with no annotations
+            gt_boxes = np.empty((0, 4), dtype=np.float32)
+            gt_labels = np.empty((0,), dtype=np.int64)
+    
     targets.append(sv.Detections(xyxy=gt_boxes, class_id=gt_labels))
 
     inputs = processor(images=image, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         outputs = model(**inputs)
+    
     results = processor.post_process_object_detection(
         outputs, target_sizes=[(h, w)], threshold=0.3
     )[0]
 
-    pred_boxes = results["boxes"].cpu().numpy() if torch.is_tensor(results["boxes"]) else results["boxes"]
-    pred_scores = results["scores"].cpu().numpy() if torch.is_tensor(results["scores"]) else results["scores"]
-    pred_labels = results["labels"].cpu().numpy() if torch.is_tensor(results["labels"]) else results["labels"]
+    pred_boxes = results["boxes"].cpu().numpy()
+    pred_scores = results["scores"].cpu().numpy()
+    pred_labels = results["labels"].cpu().numpy()
+
+    if len(pred_boxes) == 0:
+            pred_boxes = np.empty((0, 4), dtype=np.float32)
+            pred_scores = np.empty((0,), dtype=np.float32)
+            pred_labels = np.empty((0,), dtype=np.int64)
+    
     predictions.append(sv.Detections(xyxy=pred_boxes, class_id=pred_labels, confidence=pred_scores))
 
 
-mean_average_precision = sv.MeanAveragePrecision.from_detections(
-    predictions=predictions,
-    targets=targets,
-)
-print(f"mAP@[.5:.95]: {mean_average_precision.map50_95:.3f}")
-print(f"mAP@.5: {mean_average_precision.map50:.3f}")
-print(f"mAP@.75: {mean_average_precision.map75:.3f}")
-
-
+if targets and predictions:
+    try:
+        mean_average_precision = sv.MeanAveragePrecision.from_detections(
+            predictions=predictions, 
+            targets=targets
+        )
+        print(f"mAP@[.5:.95]: {mean_average_precision.map50_95:.3f}")
+        print(f"mAP@.5: {mean_average_precision.map50:.3f}")
+        print(f"mAP@.75: {mean_average_precision.map75:.3f}")
+    except Exception as e:
+        print(f"Error calculating mAP: {e}")
+        print("This might be due to having no valid detections or targets")
+else:
+    print("No valid predictions or targets found for evaluation")
+# mean_average_precision = sv.MeanAveragePrecision.from_detections(predictions=predictions, targets=targets)
+# print(f"mAP@[.5:.95]: {mean_average_precision.map50_95:.3f}")
+# print(f"mAP@.5: {mean_average_precision.map50:.3f}")
+# print(f"mAP@.75: {mean_average_precision.map75:.3f}")

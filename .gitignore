@@ -186,3 +186,7 @@ cython_debug/
 .pypirc
 
 hummingbird-env/
+
+Label-Birdfeeder-Camera-Observations-3/
+
+humming_bird_detection/hummingbird_detection/outputs
